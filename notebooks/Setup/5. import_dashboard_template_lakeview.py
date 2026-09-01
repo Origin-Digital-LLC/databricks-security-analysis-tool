@@ -165,56 +165,57 @@ print("✅ Dashboard JSON file updated successfully!")
 import requests
 import time
 
-exists = False
-dashboard_id = None
-page_token = None
 MAX_RETRIES = 5
 
-while True:
-    params = {}
-    if page_token:
-        params['page_token'] = page_token
+def find_dashboard_id_by_name(display_name):
+    """Paginate /api/2.0/lakeview/dashboards looking for an exact display_name match.
 
-    for attempt in range(MAX_RETRIES):
-        response = requests.get(
-            'https://%s/api/2.0/lakeview/dashboards' % (DOMAIN),
-            headers={'Authorization': 'Bearer %s' % token},
-            params=params,
-            timeout=60
-        )
-        if response.status_code == 429:
-            wait_time = 2 ** attempt
-            print(f"Rate limited. Retrying in {wait_time}s...")
-            time.sleep(wait_time)
-        else:
-            break
+    Used both to detect a pre-existing dashboard and, after a create call, as a
+    fallback lookup on clouds where the create response omits `dashboard_id`.
+    """
+    page_token = None
+    while True:
+        params = {}
+        if page_token:
+            params['page_token'] = page_token
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Failed to list dashboards after retries: {response.status_code} {response.text}"
-        )
+        for attempt in range(MAX_RETRIES):
+            response = requests.get(
+                'https://%s/api/2.0/lakeview/dashboards' % (DOMAIN),
+                headers={'Authorization': 'Bearer %s' % token},
+                params=params,
+                timeout=60
+            )
+            if response.status_code == 429:
+                wait_time = 2 ** attempt
+                print(f"Rate limited. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                break
 
-    json_response = response.json()
-    dashboards = json_response.get('dashboards', [])
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to list dashboards after retries: {response.status_code} {response.text}"
+            )
 
-    for d in dashboards:
-        if d['display_name'] == 'Security Analysis Tool [SAT]':
-            dashboard_id = d['dashboard_id']
-            exists = True
-            print(f"Dashboard already exists (ID: {dashboard_id})")
-            break
+        json_response = response.json()
+        for d in json_response.get('dashboards', []):
+            if d['display_name'] == display_name:
+                return d['dashboard_id']
 
-    if exists:
-        break
+        page_token = json_response.get('next_page_token')
+        if not page_token:
+            return None
 
-    page_token = json_response.get('next_page_token')
-    if not page_token:
-        break
+        # Small delay between pages to avoid hitting rate limits
+        time.sleep(1)
 
-    # Small delay between pages to avoid hitting rate limits
-    time.sleep(1)
+dashboard_id = find_dashboard_id_by_name('Security Analysis Tool [SAT]')
+exists = dashboard_id is not None
 
-if not exists:
+if exists:
+    print(f"Dashboard already exists (ID: {dashboard_id})")
+else:
     print("Dashboard doesn't exist yet")
 
 
@@ -264,8 +265,16 @@ if 'ALREADY_EXISTS' not in response.text:
     if response.status_code != 200:
         raise Exception(f"Dashboard creation failed with status {response.status_code}: {response.text}")
     json_response = response.json()
-    dashboard_id = json_response['dashboard_id']
-    serialized_dashboard = json_response['serialized_dashboard']
+    dashboard_id = json_response.get('dashboard_id')
+    serialized_dashboard = json_response.get('serialized_dashboard')
+    if not dashboard_id:
+        # Some clouds (observed on AWS) return 200 with a body that omits
+        # dashboard_id entirely. Fall back to looking it up by name.
+        dashboard_id = find_dashboard_id_by_name('Security Analysis Tool [SAT]')
+        if not dashboard_id:
+            raise Exception(
+                f"Dashboard creation returned 200 but no dashboard_id in body or lookup: {response.text}"
+            )
 else:
     exists = True
     print("Lakeview Dashboard already exists")
